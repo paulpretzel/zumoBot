@@ -1,1 +1,5 @@
 sudo find / -name "pyrealsense2*.so" 2>/dev/null
+
+sudo find / -name "pyrealsense2*.so" 2>/dev/null
+/home/zumobot/zumo_robot/zumo_env/lib/python3.13/site-packages/pyrealsense2/pyrealsense2.cpython-313-aarch64-linux-gnu.so
+/home/zumobot/librealsense/build/Release/pyrealsense2.cpython-313-aarch64-linux-gnu.so
