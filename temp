@@ -1,1 +1,1 @@
-export PYTHONPATH=$PYTHONPATH:/usr/local/lib/python3/dist-packages/pyrealsense2
+python3 -c "import pyrealsense2 as rs; print('IT WORKS!')"
