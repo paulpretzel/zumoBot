@@ -1,21 +1,7 @@
 import pyrealsense2 as rs
 
-# Create a context object (this talks to the USB ports)
 ctx = rs.context()
-
-# Ask it how many RealSense cameras it sees
 print(f"Cameras found: {len(ctx.devices)}")
 
-# Print the name of the camera
-for d in ctx.devices:
-    print(d.get_info(rs.camera_info.name))import pyrealsense2 as rs
-
-# Create a context object (this talks to the USB ports)
-ctx = rs.context()
-
-# Ask it how many RealSense cameras it sees
-print(f"Cameras found: {len(ctx.devices)}")
-
-# Print the name of the camera
 for d in ctx.devices:
     print(d.get_info(rs.camera_info.name))
