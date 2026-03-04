@@ -1,1 +1,2 @@
-sudo ./scripts/setup_udev_rules.sh
+mkdir build && cd build
+cmake ../ -DBUILD_PYTHON_BINDINGS:bool=true -DPYTHON_EXECUTABLE=$(which python3) -DCMAKE_BUILD_TYPE=Release -DBUILD_EXAMPLES=false -DBUILD_GRAPHICAL_EXAMPLES=false
