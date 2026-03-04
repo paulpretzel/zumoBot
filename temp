@@ -1,1 +1,1 @@
-python3 -c "import numpy; print('NumPy is installed and working!')"
+export PYTHONPATH=$PYTHONPATH:/usr/local/lib/python3/dist-packages/pyrealsense2
