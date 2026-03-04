@@ -1,1 +1,1 @@
-python3 -c "import pyrealsense2 as rs; print('IT WORKS!')"
+export PYTHONPATH=$PYTHONPATH:/usr/local/lib/python$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')/site-packages:/usr/local/lib/python$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')/dist-packages
