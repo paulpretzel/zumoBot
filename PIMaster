@@ -1,0 +1,67 @@
+import socket
+import sys
+import math
+import serial
+import time
+
+# --- Configuration ---
+UDP_IP = "0.0.0.0"
+UDP_PORT = 5005
+ZUMO_SERIAL_PORT = '/dev/ttyACM0'  # Check this matches your Pi's USB port assignment!
+BAUD_RATE = 115200
+
+# --- Control Law Tuning ---
+K_w = 2.5       # Proportional gain for turning
+MAX_V = 0.3     # Max linear speed (keeping it safe within your 0.483 LUT max)
+GOAL_TOL = 0.1  # Distance threshold to stop (meters)
+
+# Setup UDP
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+sock.bind((UDP_IP, UDP_PORT))
+
+# Setup Serial to Zumo
+try:
+    zumo_serial = serial.Serial(ZUMO_SERIAL_PORT, BAUD_RATE, timeout=0.1)
+    print(f"[RPi] Connected to Zumo on {ZUMO_SERIAL_PORT}")
+except Exception as e:
+    print(f"[RPi] Serial Error: {e}")
+    sys.exit(1)
+
+print(f"[RPi] Listening on port {UDP_PORT}...")
+
+while True:
+    try:
+        data, addr = sock.recvfrom(1024)
+        values = data.decode().split()
+        
+        # Parse kinematics
+        zumo_x, zumo_y = float(values[0]), float(values[1])
+        relative_heading = float(values[5])
+        goal_x, goal_y = float(values[6]), float(values[7])
+        
+        # 1. Calculate Distance to Goal
+        distance = math.sqrt((goal_x - zumo_x)**2 + (goal_y - zumo_y)**2)
+        
+        # 2. Control Law
+        if distance < GOAL_TOL:
+            V = 0.0
+            W = 0.0
+            print("Goal Reached! Stopping.")
+        else:
+            # Proportional turning
+            W = K_w * relative_heading
+            
+            # Scale forward velocity based on heading error 
+            # (Slows down if it needs to make a sharp turn)
+            speed_scale = max(0.0, 1.0 - (abs(relative_heading) / (math.pi / 2)))
+            V = MAX_V * speed_scale
+            
+        # 3. Send over Serial to Zumo as "V,W\n"
+        command = f"{V:.3f},{W:.3f}\n"
+        zumo_serial.write(command.encode('utf-8'))
+        
+        print(f"Dist: {distance:.2f}m | Cmd -> V: {V:.3f}, W: {W:.3f}")
+        
+    except Exception as e:
+        print(f"[RPi] Error: {e}")
