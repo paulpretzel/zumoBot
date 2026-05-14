@@ -1,0 +1,40 @@
+// --- ADD THIS GLOBAL VARIABLE AT THE TOP ---
+unsigned long last_command_time = 0;
+const unsigned long WATCHDOG_TIMEOUT_MS = 500; // Stop if no data for 500ms
+
+void setup() {
+  Serial.begin(115200);
+  display.clear();
+  display.print(F("Ready"));
+  // No more waiting for button A!
+}
+
+void loop() {
+  // 1. Check for incoming Serial data from the Pi
+  if (Serial.available() > 0) {
+    // Read the string until the newline character we sent from Python
+    String incomingCmd = Serial.readStringUntil('\n');
+    
+    // 2. Parse the "V,W" format
+    int commaIndex = incomingCmd.indexOf(',');
+    if (commaIndex > 0) {
+      float target_V = incomingCmd.substring(0, commaIndex).toFloat();
+      float target_W = incomingCmd.substring(commaIndex + 1).toFloat();
+      
+      // 3. Convert to PWM and drive
+      int left_pwm = 0, right_pwm = 0;
+      calculateMotorCommands(target_V, target_W, left_pwm, right_pwm);
+      motors.setSpeeds(left_pwm, right_pwm);
+      
+      // Reset watchdog timer
+      last_command_time = millis();
+    }
+  }
+
+  // 4. Failsafe Watchdog: Stop if connection is lost
+  if (millis() - last_command_time > WATCHDOG_TIMEOUT_MS) {
+    motors.setSpeeds(0, 0);
+    display.clear();
+    display.print(F("NO DATA"));
+  }
+}
