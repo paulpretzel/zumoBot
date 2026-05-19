@@ -3,3 +3,4 @@
 /home/zumobot/Desktop
 
 /home/zumobot/Desktop/Zumo/zumo_env/bin/python /home/zumobot/Desktop/mocap_vision_client.py
+/home/zumobot/Desktop/Zumo/zumo_env/bin/pip install open3d
