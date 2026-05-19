@@ -1,3 +1,5 @@
 /home/zumobot/Desktop/Zumo/zumo_env/lib/python3.13/site-packages
 
 /home/zumobot/Desktop
+
+/home/zumobot/Desktop/Zumo/zumo_env/bin/python /home/zumobot/Desktop/mocap_vision_client.py
