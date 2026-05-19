@@ -1,9 +1,7 @@
 import pyrealsense2 as rs
 import numpy as np
-import open3d as o3d
 import socket
 import serial
-import time
 import math
 import sys
 import csv
@@ -17,45 +15,77 @@ UDP_IP = "0.0.0.0"
 UDP_PORT = 5005
 
 # --- 2. Kinematic Control Law Parameters ---
-K_w = -2.5          # Proportional gain for turning (Negative based on previous fix)
+K_w = -2.5          # Proportional gain for turning
 MAX_V = 0.25        # Max linear speed (m/s)
 AVOID_V = 0.10      # Forward speed while avoiding
 AVOID_W = 3.0       # Sharp turn speed for avoidance
 GOAL_TOL = 0.1      # Distance threshold to stop (m)
 
-# --- 3. Camera & RANSAC Parameters (From your script) ---
-VOXEL_SIZE = 0.015
-DISTANCE_THRESHOLD = 0.04
+# --- 3. Camera & RANSAC Parameters ---
+SUBSAMPLE_RATE = 10        # Downsample depth image to save Pi CPU
+DISTANCE_THRESHOLD = 0.04  # RANSAC floor thickness (4cm)
 SAFE_DISTANCE = 0.60       # Look ahead distance for obstacles
-DEPTH_TRUNC = 2.0
+DEPTH_TRUNC = 2.0          # Max depth distance
 MIN_SCAN_DISTANCE = 0.15   # Ignore the Zumo's own scoop
 
-# --- 4. Polar Scan Settings (From your script) ---
+# --- 4. Polar Scan Settings ---
 THETA_MIN = -35
 THETA_MAX = 35
 THETA_STEP = 1
 NUM_BINS = int((THETA_MAX - THETA_MIN) / THETA_STEP)
 SCAN_BUFFER_SIZE = 3
 
-# --- 5. RANSAC Helper Functions ---
-def detect_ground_plane(pcd):
-    if not pcd.has_points():
-        return None, pcd, False
-    plane_model, inliers = pcd.segment_plane(distance_threshold=DISTANCE_THRESHOLD,
-                                             ransac_n=3,
-                                             num_iterations=250)
-    if len(inliers) < 100:
-        return None, pcd, False
-    ground_cloud = pcd.select_by_index(inliers)
-    obstacle_cloud = pcd.select_by_index(inliers, invert=True)
-    return ground_cloud, obstacle_cloud, True
+# --- 5. Pure NumPy RANSAC Implementation ---
+def detect_ground_plane_numpy(points):
+    """Custom RANSAC to replace Open3D. Returns Ground Points, Obstacle Points."""
+    if len(points) < 100:
+        return points, points, False
 
-def extract_polar_coords(pcd):
-    if not pcd.has_points():
+    best_inliers_mask = None
+    max_inliers = 0
+
+    # Fast NumPy RANSAC Loop
+    for _ in range(100):
+        # 1. Randomly pick 3 points
+        idx = np.random.choice(len(points), 3, replace=False)
+        p1, p2, p3 = points[idx]
+
+        # 2. Find plane normal via vector cross product
+        v1 = p2 - p1
+        v2 = p3 - p1
+        normal = np.cross(v1, v2)
+        norm = np.linalg.norm(normal)
+        if norm == 0: continue
+        normal = normal / norm
+
+        # 3. Plane equation: dot(normal, p) + d = 0
+        d = -np.dot(normal, p1)
+
+        # 4. Calculate distance of all points to the plane
+        distances = np.abs(np.dot(points, normal) + d)
+
+        # 5. Count how many points lie on this plane
+        inliers_mask = distances < DISTANCE_THRESHOLD
+        num_inliers = np.sum(inliers_mask)
+
+        # 6. Save the best plane
+        if num_inliers > max_inliers:
+            max_inliers = num_inliers
+            best_inliers_mask = inliers_mask
+
+    if max_inliers < 100:
+        return points, points, False
+
+    ground_points = points[best_inliers_mask]
+    obstacle_points = points[~best_inliers_mask]
+
+    return ground_points, obstacle_points, True
+
+def extract_polar_coords_numpy(points):
+    if len(points) == 0:
         return np.array([]), np.array([])
-    pts = np.asarray(pcd.points)
-    x = pts[:, 0]
-    z = np.abs(pts[:, 2])  
+    x = points[:, 0]
+    z = np.abs(points[:, 2])  
     rho = np.sqrt(x ** 2 + z ** 2)
     theta = np.arctan2(x, z)
     return rho, theta
@@ -101,7 +131,8 @@ def run_autonomous_zumo():
     spatial = rs.spatial_filter()
     temporal = rs.temporal_filter()
     print("[HW] Starting RealSense Pipeline...")
-    pipeline.start(config)
+    profile = pipeline.start(config)
+    depth_scale = profile.get_device().first_depth_sensor().get_depth_scale()
 
     # Setup CSV Logging
     csv_file = open('ransac_nav_log.csv', mode='w', newline='')
@@ -132,23 +163,35 @@ def run_autonomous_zumo():
             intrinsics = depth_frame.profile.as_video_stream_profile().intrinsics
             depth_image = np.asanyarray(depth_frame.get_data())
             
-            # C. Create Point Cloud
-            pinhole = o3d.camera.PinholeCameraIntrinsic(
-                intrinsics.width, intrinsics.height, intrinsics.fx, intrinsics.fy, intrinsics.ppx, intrinsics.ppy)
-            temp_pcd = o3d.geometry.PointCloud.create_from_depth_image(
-                o3d.geometry.Image(depth_image), pinhole, depth_scale=1000.0, depth_trunc=DEPTH_TRUNC)
-            temp_pcd.transform([[1, 0, 0, 0], [0, -1, 0, 0], [0, 0, -1, 0], [0, 0, 0, 1]])
-            temp_pcd = temp_pcd.voxel_down_sample(voxel_size=VOXEL_SIZE)
+            # C. Fast NumPy Point Cloud Generation
+            # Subsample image to save Pi CPU
+            depth_sub = depth_image[::SUBSAMPLE_RATE, ::SUBSAMPLE_RATE]
+            z = depth_sub * depth_scale
+            
+            valid = (z > 0) & (z < DEPTH_TRUNC)
+            v_sub, u_sub = np.where(valid)
+            z_valid = z[valid]
+            
+            # Map back to original pixels
+            u_orig = u_sub * SUBSAMPLE_RATE
+            v_orig = v_sub * SUBSAMPLE_RATE
+            
+            # Pinhole projection
+            x = (u_orig - intrinsics.ppx) * z_valid / intrinsics.fx
+            y = (v_orig - intrinsics.ppy) * z_valid / intrinsics.fy
+            
+            # Rotate coords to match original Open3D expectations
+            points = np.column_stack((x, -y, -z))
 
-            # D. RANSAC Floor Detection
-            ground, obstacles, success = detect_ground_plane(temp_pcd)
+            # D. Custom RANSAC Floor Detection
+            ground, obstacles, success = detect_ground_plane_numpy(points)
             
             V_cmd, W_cmd = 0.0, 0.0
             state_str = "MOCAP_GOAL"
             filtered_scan = np.zeros(NUM_BINS)
 
             if success:
-                ground_rho, ground_theta = extract_polar_coords(ground)
+                ground_rho, ground_theta = extract_polar_coords_numpy(ground)
                 ground_theta_deg = np.degrees(ground_theta)
                 raw_scan = generate_safe_driving_boundary(ground_rho, ground_theta_deg)
 
@@ -173,12 +216,12 @@ def run_autonomous_zumo():
                         V_cmd = AVOID_V
                         W_cmd = AVOID_W if left_space > right_space else -AVOID_W
                 else:
-                    # No floor detected ahead (cliff or massive wall)
+                    # No floor detected ahead
                     state_str = "OBSTACLE_AVOID"
-                    V_cmd = -0.05 # Slightly back up
+                    V_cmd = -0.05
                     W_cmd = AVOID_W 
 
-            # E. Mocap Logic (Only runs if path is clear)
+            # E. Mocap Logic 
             if state_str == "MOCAP_GOAL" and mocap_data:
                 zumo_x, zumo_y = float(mocap_data[0]), float(mocap_data[1])
                 relative_heading = float(mocap_data[5])
