@@ -1,5 +1,6 @@
 import pyrealsense2 as rs
 import numpy as np
+import cv2  # Restored OpenCV for the camera view
 import socket
 import serial
 import math
@@ -46,11 +47,9 @@ def detect_ground_plane_numpy(points):
 
     # Fast NumPy RANSAC Loop
     for _ in range(100):
-        # 1. Randomly pick 3 points
         idx = np.random.choice(len(points), 3, replace=False)
         p1, p2, p3 = points[idx]
 
-        # 2. Find plane normal via vector cross product
         v1 = p2 - p1
         v2 = p3 - p1
         normal = np.cross(v1, v2)
@@ -58,17 +57,11 @@ def detect_ground_plane_numpy(points):
         if norm == 0: continue
         normal = normal / norm
 
-        # 3. Plane equation: dot(normal, p) + d = 0
         d = -np.dot(normal, p1)
-
-        # 4. Calculate distance of all points to the plane
         distances = np.abs(np.dot(points, normal) + d)
-
-        # 5. Count how many points lie on this plane
         inliers_mask = distances < DISTANCE_THRESHOLD
         num_inliers = np.sum(inliers_mask)
 
-        # 6. Save the best plane
         if num_inliers > max_inliers:
             max_inliers = num_inliers
             best_inliers_mask = inliers_mask
@@ -78,7 +71,6 @@ def detect_ground_plane_numpy(points):
 
     ground_points = points[best_inliers_mask]
     obstacle_points = points[~best_inliers_mask]
-
     return ground_points, obstacle_points, True
 
 def extract_polar_coords_numpy(points):
@@ -127,12 +119,17 @@ def run_autonomous_zumo():
     pipeline = rs.pipeline()
     config = rs.config()
     config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
+    config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30) # Restored Color Stream
+    
     decimation = rs.decimation_filter()
     spatial = rs.spatial_filter()
     temporal = rs.temporal_filter()
     print("[HW] Starting RealSense Pipeline...")
     profile = pipeline.start(config)
     depth_scale = profile.get_device().first_depth_sensor().get_depth_scale()
+
+    # Restored OpenCV Window
+    cv2.namedWindow("Zumo Vision (Raw)", cv2.WINDOW_AUTOSIZE)
 
     # Setup CSV Logging
     csv_file = open('ransac_nav_log.csv', mode='w', newline='')
@@ -142,6 +139,9 @@ def run_autonomous_zumo():
 
     scan_buffer = deque(maxlen=SCAN_BUFFER_SIZE)
     mocap_data = None
+    
+    # Anti-Chattering Lock
+    avoid_direction_locked = 0.0 
 
     try:
         while True:
@@ -153,10 +153,20 @@ def run_autonomous_zumo():
             except BlockingIOError:
                 pass 
 
-            # B. Fetch Camera Frame
+            # B. Fetch Camera Frames
             frames = pipeline.wait_for_frames()
             depth_frame = frames.get_depth_frame()
-            if not depth_frame: continue
+            color_frame = frames.get_color_frame()
+            if not depth_frame or not color_frame: continue
+
+            # Render OpenCV Camera View
+            color_image = np.asanyarray(color_frame.get_data())
+            cv2.imshow("Zumo Vision (Raw)", color_image)
+            
+            # Press 'q' in the video window to quit gracefully
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                print("\n[SYS] Quit command received via camera window.")
+                break
 
             # Filter Depth
             depth_frame = temporal.process(spatial.process(decimation.process(depth_frame)))
@@ -164,7 +174,6 @@ def run_autonomous_zumo():
             depth_image = np.asanyarray(depth_frame.get_data())
             
             # C. Fast NumPy Point Cloud Generation
-            # Subsample image to save Pi CPU
             depth_sub = depth_image[::SUBSAMPLE_RATE, ::SUBSAMPLE_RATE]
             z = depth_sub * depth_scale
             
@@ -172,16 +181,14 @@ def run_autonomous_zumo():
             v_sub, u_sub = np.where(valid)
             z_valid = z[valid]
             
-            # Map back to original pixels
             u_orig = u_sub * SUBSAMPLE_RATE
             v_orig = v_sub * SUBSAMPLE_RATE
             
-            # Pinhole projection
             x = (u_orig - intrinsics.ppx) * z_valid / intrinsics.fx
             y = (v_orig - intrinsics.ppy) * z_valid / intrinsics.fy
             
-            # Rotate coords to match original Open3D expectations
-            points = np.column_stack((x, -y, -z))
+            # Fixed Array Concatenation Bug
+            points = np.column_stack((x, -y, -z_valid))
 
             # D. Custom RANSAC Floor Detection
             ground, obstacles, success = detect_ground_plane_numpy(points)
@@ -200,8 +207,8 @@ def run_autonomous_zumo():
                 scan_buffer.append(raw_scan)
                 filtered_scan = np.median(np.array(scan_buffer), axis=0)
 
-                # Avoidance Logic based on RANSAC boundary
-                center_slice = filtered_scan[30:40] # Look straight ahead
+                # Avoidance Logic with Hysteresis
+                center_slice = filtered_scan[30:40] 
                 valid_floor = center_slice[center_slice > 0]
 
                 if len(valid_floor) > 0:
@@ -209,17 +216,24 @@ def run_autonomous_zumo():
                     if floor_edge_dist < SAFE_DISTANCE:
                         state_str = "OBSTACLE_AVOID"
                         
-                        # Decide which way to turn based on floor boundaries
-                        left_space = np.mean(filtered_scan[:35])
-                        right_space = np.mean(filtered_scan[35:])
+                        # Lock steering direction to prevent chattering
+                        if avoid_direction_locked == 0.0:
+                            left_space = np.mean(filtered_scan[:35])
+                            right_space = np.mean(filtered_scan[35:])
+                            avoid_direction_locked = AVOID_W if left_space > right_space else -AVOID_W
                         
                         V_cmd = AVOID_V
-                        W_cmd = AVOID_W if left_space > right_space else -AVOID_W
+                        W_cmd = avoid_direction_locked
+                    else:
+                        # Path is clear, unlock steering
+                        avoid_direction_locked = 0.0
                 else:
                     # No floor detected ahead
                     state_str = "OBSTACLE_AVOID"
+                    if avoid_direction_locked == 0.0:
+                        avoid_direction_locked = AVOID_W 
                     V_cmd = -0.05
-                    W_cmd = AVOID_W 
+                    W_cmd = avoid_direction_locked 
 
             # E. Mocap Logic 
             if state_str == "MOCAP_GOAL" and mocap_data:
@@ -251,6 +265,7 @@ def run_autonomous_zumo():
         print("\n[SYS] Shutting down...")
     finally:
         pipeline.stop()
+        cv2.destroyAllWindows()  # Cleanly close the camera view
         zumo_serial.write(b"0.0,0.0\n")
         zumo_serial.close()
         csv_file.close()
